@@ -1,0 +1,32 @@
+{
+  "detector": {
+    "base_temp_dir": "temp_processing",
+    "model_name": "MIT/ast-finetuned-audioset-10-10-0.4593",
+    "singing_like_indices": [
+      27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 112, 113, 114, 116,
+      117, 118, 119, 120, 136, 254, 255, 266, 259, 268, 269, 271,
+      402, 496, 503, 523, 526
+    ]
+  },
+  "slicer": {
+    "segment_length_seconds": 600
+  },
+  "separator": {
+    "demucs_model_subdir": "htdemucs",
+    "accompaniment_filename": "accompaniment.wav",
+    "demucs_timeout_seconds": 600
+  },
+  "analyzer": {
+    "ast_slice_duration_seconds": 5,
+    "mfcc_slice_duration_seconds": 5,
+    "mfcc_n_mfcc": 13,
+    "pca_n_components": 2,
+    "kmeans_n_clusters": 2
+  },
+  "postprocessing": {
+    "grouping_interval_threshold_seconds": 5,
+    "grouping_duration_threshold_seconds": 10,
+    "overlap_merge_threshold_seconds": 30,
+    "too_long_threshold_seconds": 420
+  }
+} 
