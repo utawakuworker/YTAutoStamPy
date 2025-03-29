@@ -8,7 +8,7 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import torch
 from transformers import AutoModelForAudioClassification, ASTFeatureExtractor
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Dict
 import logging # Import logging
 
 # Import utilities from the utils module

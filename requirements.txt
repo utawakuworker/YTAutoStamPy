@@ -1,1 +1,17 @@
- 
+# Core dependencies
+yt-dlp
+ffmpeg-python
+transformers
+torch
+torchaudio
+pandas
+numpy
+scikit-learn
+matplotlib
+tqdm
+librosa
+demucs
+
+# For Colab interface (optional if not using colab_interface.py)
+ipywidgets
+IPython 

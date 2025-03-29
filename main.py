@@ -88,23 +88,22 @@ def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[st
         if results_with_accomp.empty:
             logger.info("None found.") # Use logger.info
         else:
-            # Log the dataframe content (might be long for DEBUG/INFO)
-            # Consider logging only summary info or saving to file
+            # Log the dataframe content. For very long results, consider logging
+            # results_with_accomp.head() or saving to CSV and logging the path.
             logger.info(f"\n{results_with_accomp.to_string()}") # Log full df string
             # Optional: Save to CSV or JSON
             # results_with_accomp.to_csv("results_singing_with_accompaniment.csv", index=False)
-            # logger.info("\nJSON format:")
-            # logger.info(results_with_accomp.to_json(orient='records', indent=2))
+            # logger.info("Results saved to results_singing_with_accompaniment.csv")
 
         logger.info("\nSegments with Potential A Cappella Singing:") # Use logger.info
         if results_a_capella.empty:
              logger.info("None found.") # Use logger.info
         else:
+            # Log the dataframe content. See note above for large results.
             logger.info(f"\n{results_a_capella.to_string()}") # Log full df string
             # Optional: Save to CSV or JSON
             # results_a_capella.to_csv("results_a_capella.csv", index=False)
-            # logger.info("\nJSON format:")
-            # logger.info(results_a_capella.to_json(orient='records', indent=2))
+            # logger.info("Results saved to results_a_capella.csv")
     else:
         logger.error(f"\nVideo processing failed for {youtube_url}. No results generated.") # Use logger.error
 
