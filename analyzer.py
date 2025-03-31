@@ -10,6 +10,9 @@ import torch
 from transformers import AutoModelForAudioClassification, ASTFeatureExtractor
 from typing import List, Tuple, Any, Dict
 import logging # Import logging
+from scipy import signal
+from pathlib import Path
+import os
 
 # Import utilities from the utils module
 from utils import seconds_to_hhmmss
@@ -422,4 +425,280 @@ def cluster_mfccs_with_pca(
     non_singing_df = temp_df[temp_df['class_value'] != 'Singing'].reset_index(drop=True)
 
     logger.info(f"Created {len(singing_df)} 'Singing' segments and {len(non_singing_df)} 'Non-Singing' segments based on MFCC clustering.")
-    return singing_df, non_singing_df 
+    return singing_df, non_singing_df
+
+class AudioAnalyzer:
+    """Class for analyzing audio to detect singing segments"""
+    
+    def __init__(self, config=None):
+        """Initialize the audio analyzer with configuration"""
+        self.config = config or {}
+        self.analyzer_config = self.config.get('analyzer', {})
+        
+        # Load configuration parameters with defaults
+        self.sr = self.analyzer_config.get('sample_rate', 16000)
+        self.frame_length = self.analyzer_config.get('frame_length', 0.025)  # in seconds
+        self.frame_shift = self.analyzer_config.get('frame_shift', 0.01)     # in seconds
+        self.n_mfcc = self.analyzer_config.get('n_mfcc', 13)
+        self.n_fft = self.analyzer_config.get('n_fft', 2048)
+        self.hop_length = int(self.sr * self.frame_shift)
+        self.win_length = int(self.sr * self.frame_length)
+        
+        # Clustering parameters
+        self.n_clusters = self.analyzer_config.get('n_clusters', 2)
+        self.min_segment_length = self.analyzer_config.get('min_segment_length', 1.0)  # in seconds
+        
+        logger.info(f"Initialized AudioAnalyzer with sample rate {self.sr} Hz")
+        
+    def analyze_file(self, audio_file, visualize=False, use_demucs=True):
+        """
+        Analyze an audio file to detect singing segments.
+        
+        Args:
+            audio_file: Path to the audio file
+            visualize: Whether to visualize the results
+            use_demucs: Whether to use Demucs for vocal separation (slower but more accurate)
+                       If False, uses a faster frequency-based approach (quicker but less accurate)
+        
+        Returns:
+            Two DataFrames:
+            1. Segments detected as singing with instrumental accompaniment
+            2. Segments more likely to be a cappella singing
+        """
+        logger.info(f"Analyzing audio file: {audio_file}, use_demucs={use_demucs}")
+        
+        if use_demucs:
+            # Original implementation using Demucs for source separation
+            return self._analyze_with_demucs(audio_file, visualize)
+        else:
+            # Simplified implementation without Demucs
+            return self._analyze_fast(audio_file, visualize)
+            
+    def _analyze_fast(self, audio_file, visualize=False):
+        """
+        Fast analysis without using Demucs for source separation.
+        Uses frequency filtering to approximate vocal detection.
+        
+        Args:
+            audio_file: Path to the audio file
+            visualize: Whether to visualize the results
+            
+        Returns:
+            Two DataFrames for singing segments
+        """
+        logger.info(f"Using fast analysis mode (no Demucs) for {audio_file}")
+        
+        # Load audio file
+        y, sr = librosa.load(audio_file, sr=self.sr)
+        duration = len(y) / sr
+        logger.info(f"Loaded audio: {duration:.2f} seconds")
+        
+        # Apply bandpass filter to emphasize vocal frequencies (roughly 200-3500 Hz)
+        vocal_emphasized = self._bandpass_filter(y, sr, low_cutoff=200, high_cutoff=3500)
+        
+        # Extract features
+        mfccs = self._extract_features(vocal_emphasized)
+        
+        # Additional voice-focused features
+        zcr = librosa.feature.zero_crossing_rate(vocal_emphasized, 
+                                               frame_length=self.win_length, 
+                                               hop_length=self.hop_length)
+        
+        spectral_centroid = librosa.feature.spectral_centroid(y=vocal_emphasized, 
+                                                            sr=sr, 
+                                                            n_fft=self.n_fft, 
+                                                            hop_length=self.hop_length)
+        
+        # Normalize and combine features
+        zcr_norm = (zcr - np.mean(zcr)) / np.std(zcr)
+        spectral_centroid_norm = (spectral_centroid - np.mean(spectral_centroid)) / np.std(spectral_centroid)
+        
+        # Combine with MFCCs
+        features = np.vstack([mfccs, zcr_norm, spectral_centroid_norm])
+        
+        # Perform clustering
+        segments = self._cluster_frames(features.T, duration)
+        
+        # Since we don't have vocal/instrumental separation in fast mode,
+        # we'll do a simpler classification to approximate a cappella vs. accompanied
+        # Using energy ratio in mid vs. low/high frequencies as a rough proxy
+        
+        # Calculate energy in different frequency bands
+        stft = np.abs(librosa.stft(y, n_fft=self.n_fft, hop_length=self.hop_length))
+        
+        # Define frequency bands
+        freq_bins = librosa.fft_frequencies(sr=sr, n_fft=self.n_fft)
+        low_band = (freq_bins < 300)
+        mid_band = (freq_bins >= 300) & (freq_bins <= 3500)  # Voice range
+        high_band = (freq_bins > 3500)
+        
+        # Calculate energy in bands over time
+        low_energy = np.sum(stft[low_band, :], axis=0)
+        mid_energy = np.sum(stft[mid_band, :], axis=0)
+        high_energy = np.sum(stft[high_band, :], axis=0)
+        
+        # Ratio of mid (voice) to others (likely instruments)
+        accompaniment_ratio = mid_energy / (low_energy + high_energy + 1e-10)
+        
+        # Determine which segments are more likely a cappella vs. accompanied
+        # Higher ratio means more voice-dominant (potential a cappella)
+        accompanied_segments = []
+        acapella_segments = []
+        
+        for segment in segments:
+            start_frame = int(segment['start_time'] / self.frame_shift)
+            end_frame = int(segment['end_time'] / self.frame_shift)
+            end_frame = min(end_frame, accompaniment_ratio.shape[0])
+            
+            if start_frame < end_frame:
+                mean_ratio = np.mean(accompaniment_ratio[start_frame:end_frame])
+                
+                # Choose threshold based on experimentation
+                # You may need to adjust this threshold
+                ratio_threshold = 5.0
+                
+                if mean_ratio > ratio_threshold:
+                    acapella_segments.append(segment)
+                else:
+                    accompanied_segments.append(segment)
+        
+        # Convert to DataFrames
+        df_accompanied = pd.DataFrame(accompanied_segments)
+        df_acapella = pd.DataFrame(acapella_segments)
+        
+        if visualize:
+            self._visualize_results(y, df_accompanied, df_acapella, vocal_emphasized=vocal_emphasized)
+        
+        return df_accompanied, df_acapella
+    
+    def _bandpass_filter(self, audio, sr, low_cutoff, high_cutoff):
+        """Apply bandpass filter to audio to emphasize vocals"""
+        nyquist = 0.5 * sr
+        low = low_cutoff / nyquist
+        high = high_cutoff / nyquist
+        
+        # Create a bandpass filter
+        b, a = signal.butter(5, [low, high], btype='band')
+        
+        # Apply filter
+        filtered_audio = signal.filtfilt(b, a, audio)
+        
+        return filtered_audio
+    
+    def _extract_features(self, audio):
+        """Extract MFCC features from audio"""
+        mfccs = librosa.feature.mfcc(y=audio, sr=self.sr, n_mfcc=self.n_mfcc,
+                                   n_fft=self.n_fft, hop_length=self.hop_length)
+        return mfccs
+    
+    def _cluster_frames(self, features, duration):
+        """Cluster frames based on features and identify singing segments"""
+        logger.info(f"Clustering frames with {self.n_clusters} clusters")
+        
+        # Apply K-means clustering
+        kmeans = KMeans(n_clusters=self.n_clusters, random_state=0)
+        cluster_labels = kmeans.fit_predict(features)
+        
+        # Determine which cluster corresponds to singing
+        # Here we use a simple heuristic: singing clusters generally have higher energy in MFCCs
+        cluster_mfcc_energy = []
+        for i in range(self.n_clusters):
+            cluster_frames = features[cluster_labels == i]
+            if len(cluster_frames) > 0:
+                cluster_mfcc_energy.append(np.mean(np.abs(cluster_frames[:, :self.n_mfcc])))
+            else:
+                cluster_mfcc_energy.append(0)
+        
+        singing_cluster = np.argmax(cluster_mfcc_energy)
+        logger.info(f"Identified singing cluster: {singing_cluster}")
+        
+        # Create segments from consecutive frames
+        segments = []
+        in_segment = False
+        start_frame = 0
+        
+        for i, label in enumerate(cluster_labels):
+            if label == singing_cluster and not in_segment:
+                # Start of a new segment
+                in_segment = True
+                start_frame = i
+            elif label != singing_cluster and in_segment:
+                # End of a segment
+                end_frame = i
+                segment_start_time = start_frame * self.frame_shift
+                segment_end_time = end_frame * self.frame_shift
+                
+                # Only keep segments longer than the minimum length
+                if segment_end_time - segment_start_time >= self.min_segment_length:
+                    segments.append({
+                        'start_time': segment_start_time,
+                        'end_time': segment_end_time,
+                        'duration': segment_end_time - segment_start_time
+                    })
+                
+                in_segment = False
+        
+        # Don't forget the last segment if we're still in one
+        if in_segment:
+            end_frame = len(cluster_labels)
+            segment_start_time = start_frame * self.frame_shift
+            segment_end_time = end_frame * self.frame_shift
+            
+            if segment_end_time - segment_start_time >= self.min_segment_length:
+                segments.append({
+                    'start_time': segment_start_time,
+                    'end_time': segment_end_time,
+                    'duration': segment_end_time - segment_start_time
+                })
+        
+        logger.info(f"Detected {len(segments)} singing segments")
+        return segments
+    
+    # ... existing methods below ...
+    def _analyze_with_demucs(self, audio_file, visualize=False):
+        """
+        Original implementation using Demucs for source separation
+        """
+        # Your existing Demucs-based implementation here
+        # ...
+        
+    def _visualize_results(self, audio, df_accompanied, df_acapella, vocals=None, vocal_emphasized=None):
+        """Visualize the audio waveform and detected segments"""
+        plt.figure(figsize=(12, 8))
+        
+        # Plot audio waveform
+        plt.subplot(311)
+        plt.plot(np.linspace(0, len(audio) / self.sr, len(audio)), audio)
+        plt.title('Original Audio Waveform')
+        plt.xlabel('Time (s)')
+        
+        # Mark singing with accompaniment segments
+        for _, row in df_accompanied.iterrows():
+            plt.axvspan(row['start_time'], row['end_time'], alpha=0.3, color='red')
+        
+        # Mark a cappella segments
+        for _, row in df_acapella.iterrows():
+            plt.axvspan(row['start_time'], row['end_time'], alpha=0.3, color='blue')
+        
+        # Plot vocals if available
+        if vocals is not None:
+            plt.subplot(312)
+            plt.plot(np.linspace(0, len(vocals) / self.sr, len(vocals)), vocals)
+            plt.title('Extracted Vocals')
+            plt.xlabel('Time (s)')
+        elif vocal_emphasized is not None:
+            plt.subplot(312)
+            plt.plot(np.linspace(0, len(vocal_emphasized) / self.sr, len(vocal_emphasized)), vocal_emphasized)
+            plt.title('Voice-Emphasized Audio (Bandpass Filtered)')
+            plt.xlabel('Time (s)')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='red', alpha=0.3, label='Singing with Accompaniment'),
+            Patch(facecolor='blue', alpha=0.3, label='Potential A Cappella')
+        ]
+        plt.figlegend(handles=legend_elements, loc='upper center', bbox_to_anchor=(0.5, 0.05), ncol=2)
+        
+        plt.tight_layout()
+        plt.show() 

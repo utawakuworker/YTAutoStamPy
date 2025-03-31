@@ -85,3 +85,52 @@ def load_config(config_path: str = "config.json") -> dict:
     except Exception as e:
         logger.exception(f"Failed to load config file {config_path}") # Use logger.exception
         raise RuntimeError(f"Failed to load config file {config_path}: {e}") from e 
+
+def add_api_key_to_config(config_path, api_name, api_key, save=True):
+    """
+    Add or update an API key in the configuration file.
+    
+    Args:
+        config_path: Path to the config.json file
+        api_name: Name of the API (e.g., 'gemini', 'openai')
+        api_key: The API key to add
+        save: Whether to save changes to the file (default True)
+        
+    Returns:
+        Updated config dictionary
+    """
+    import json
+    from pathlib import Path
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Load existing config
+        config_path = Path(config_path)
+        if not config_path.exists():
+            logger.error(f"Config file not found at {config_path}")
+            return None
+            
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            
+        # Ensure api section exists
+        if 'api' not in config:
+            config['api'] = {}
+            
+        # Add or update the API key
+        config['api'][api_name] = api_key
+        logger.info(f"Added/updated {api_name} API key in config")
+        
+        # Save the updated config if requested
+        if save:
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Saved updated config to {config_path}")
+            
+        return config
+        
+    except Exception as e:
+        logger.exception(f"Error adding API key to config: {e}")
+        return None

@@ -7,6 +7,7 @@ import logging # Import logging
 # Import the main detector class and config loader
 from detector import VideoSingingDetector
 from utils import load_config # Import the loader
+from song_identifier import identify_songs # Import the song identifier function
 
 # Default config path
 DEFAULT_CONFIG_PATH = "config.json"
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format=log_format)
 # Get a logger for this module
 logger = logging.getLogger(__name__)
 
-def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[str] = None, visualize: bool = False, cleanup_base: bool = False, log_level: str = 'INFO'):
+def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[str] = None, visualize: bool = False, cleanup_base: bool = False, log_level: str = 'INFO', identify: bool = False):
     """
     Main function to run the singing detection process.
 
@@ -30,6 +31,7 @@ def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[st
         visualize: Whether to show clustering visualization plots.
         cleanup_base: Whether to remove the entire base_temp_dir before starting.
         log_level: The logging level (e.g., 'DEBUG', 'INFO', 'WARNING').
+        identify: Whether to identify songs in segments with high probability of singing with accompaniment.
     """
     # --- Configure Logging Level ---
     numeric_level = getattr(logging, log_level.upper(), None)
@@ -82,22 +84,32 @@ def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[st
 
     # Display results if successful
     if results_with_accomp is not None and results_a_capella is not None:
-        logger.info("\n\n--- FINAL RESULTS ---") # Use logger.info
+        logger.info("\n\n--- FINAL RESULTS ---")
 
-        logger.info("\nSegments with High Probability of Singing with Accompaniment:") # Use logger.info
+        logger.info("\nSegments with High Probability of Singing with Accompaniment:")
         if results_with_accomp.empty:
-            logger.info("None found.") # Use logger.info
+            logger.info("None found.")
         else:
-            # Log the dataframe content. For very long results, consider logging
-            # results_with_accomp.head() or saving to CSV and logging the path.
-            logger.info(f"\n{results_with_accomp.to_string()}") # Log full df string
-            # Optional: Save to CSV or JSON
-            # results_with_accomp.to_csv("results_singing_with_accompaniment.csv", index=False)
-            # logger.info("Results saved to results_singing_with_accompaniment.csv")
-
-        logger.info("\nSegments with Potential A Cappella Singing:") # Use logger.info
+            logger.info(f"\n{results_with_accomp.to_string()}")
+            
+            # If song identification is enabled, identify songs in these segments
+            if identify and not results_with_accomp.empty:
+                logger.info("\n--- SONG IDENTIFICATION ---")
+                try:
+                    # Get the audio file path from the detector
+                    audio_file_path = detector.audio_file_path
+                    song_results = identify_songs(youtube_url, results_with_accomp, config, audio_file_path)
+                    if song_results:
+                        for segment, info in song_results.items():
+                            logger.info(f"Segment {segment}: '{info['title']}' by {info['artist']}")
+                    else:
+                        logger.info("No songs could be identified.")
+                except Exception as e:
+                    logger.error(f"Error identifying songs: {e}", exc_info=True)
+        
+        logger.info("\nSegments with Potential A Cappella Singing:")
         if results_a_capella.empty:
-             logger.info("None found.") # Use logger.info
+             logger.info("None found.")
         else:
             # Log the dataframe content. See note above for large results.
             logger.info(f"\n{results_a_capella.to_string()}") # Log full df string
@@ -105,7 +117,7 @@ def main(youtube_url: str, config_path: str, base_temp_dir_override: Optional[st
             # results_a_capella.to_csv("results_a_capella.csv", index=False)
             # logger.info("Results saved to results_a_capella.csv")
     else:
-        logger.error(f"\nVideo processing failed for {youtube_url}. No results generated.") # Use logger.error
+        logger.error(f"\nVideo processing failed for {youtube_url}. No results generated.")
 
 
 if __name__ == "__main__":
@@ -138,6 +150,11 @@ if __name__ == "__main__":
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
         help="Set the logging level (default: INFO)"
     )
+    parser.add_argument(
+        "--identify",
+        action="store_true",
+        help="Identify songs in segments with high probability of singing with accompaniment."
+    )
 
     args = parser.parse_args()
 
@@ -148,7 +165,8 @@ if __name__ == "__main__":
         base_temp_dir_override=args.temp_dir,
         visualize=args.visualize,
         cleanup_base=args.cleanup_all,
-        log_level=args.log_level # Pass log level
+        log_level=args.log_level,
+        identify=args.identify
     )
 
     # Example of how to run from command line:

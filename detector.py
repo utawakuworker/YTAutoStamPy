@@ -92,7 +92,7 @@ class VideoSingingDetector:
              logger.debug(f"Temporary directory {temp_dir_path} not found or not a directory, skipping cleanup.")
 
     def process_video(
-        self, youtube_url: str, visualize_clusters: bool = False
+        self, youtube_url: str, visualize_clusters: bool = False, identify_songs: bool = False, use_fast_mode: bool = True
     ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         """
         Processes a single YouTube video URL through all steps.
@@ -100,6 +100,8 @@ class VideoSingingDetector:
         Args:
             youtube_url: The URL of the YouTube video.
             visualize_clusters: Whether to show PCA/Energy plots during MFCC clustering.
+            identify_songs: Whether to attempt song identification.
+            use_fast_mode: Whether to use the fast mode (no Demucs).
 
         Returns:
             A tuple containing two pandas DataFrames:
