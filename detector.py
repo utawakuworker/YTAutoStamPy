@@ -14,7 +14,8 @@ from separator import SourceSeparator
 from analyzer import (
     audio_analyzer,
     mfcc_from_accompanies,
-    cluster_mfccs_with_pca
+    cluster_mfccs_with_pca,
+    AudioAnalyzer
 )
 from postprocessing import (
     class_manipulator,
@@ -165,103 +166,143 @@ class VideoSingingDetector:
                  raise RuntimeError("Slicing completed but no slice paths found.")
             logger.info(f"{len(wav_slice_paths)} slices created in {video_temp_dir}")
 
-            # --- Step 3: Separate Sources ---
-            logger.info("\n[Step 3/5] Separating Sources (Vocals/Accompaniment)...")
-            # Demucs output goes into a subdirectory within the video's temp dir
-            separation_output_dir = video_temp_dir / "separated"
-            separator = SourceSeparator(
-                wav_slice_paths,
-                output_directory=separation_output_dir,
-                config=separator_cfg # Pass config dict
-            )
-            vocal_paths, accompanies_paths = separator.separate_all()
+            # --- Step 3: Analyze ---
+            if use_fast_mode:
+                logger.info("\n[Step 3/5] Running Fast Analysis (Skipping Source Separation)...")
+                # Create a new simplified analyzer that doesn't use Demucs
+                from analyzer import AudioAnalyzer
+                analyzer = AudioAnalyzer(config=self.config)
+                
+                # Process each slice directly without Demucs separation
+                singing_segments = []
+                a_cappella_segments = []
+                
+                for i, slice_path in enumerate(wav_slice_paths):
+                    logger.info(f"Analyzing slice {i+1}/{len(wav_slice_paths)}: {slice_path}")
+                    # Use the fast analyzer method directly
+                    segments = analyzer.analyze_file(slice_path, visualize=visualize_clusters, use_demucs=False)
+                    
+                    # Add time offset for this slice
+                    slice_offset = i * slicer_cfg.get('segment_length_seconds', 600)
+                    for segment in segments:
+                        segment['start_time'] += slice_offset
+                        segment['end_time'] += slice_offset
+                    
+                    singing_segments.extend(segments)
+                
+                # Convert to DataFrames
+                higher_probability_timestamps = pd.DataFrame(singing_segments) if singing_segments else pd.DataFrame()
+                possible_a_capella = pd.DataFrame(a_cappella_segments) if a_cappella_segments else pd.DataFrame()
+                
+                # For display purposes, format the start/end times as HH:MM:SS
+                if not higher_probability_timestamps.empty:
+                    higher_probability_timestamps['start'] = higher_probability_timestamps['start_time'].apply(seconds_to_hhmmss)
+                    higher_probability_timestamps['end'] = higher_probability_timestamps['end_time'].apply(seconds_to_hhmmss)
+                
+                if not possible_a_capella.empty:
+                    possible_a_capella['start'] = possible_a_capella['start_time'].apply(seconds_to_hhmmss)
+                    possible_a_capella['end'] = possible_a_capella['end_time'].apply(seconds_to_hhmmss)
+                
+                logger.info(f"Fast analysis found {len(higher_probability_timestamps)} singing segments")
+                
+            else:
+                # Original flow with Demucs
+                logger.info("\n[Step 3/5] Separating Sources (Vocals/Accompaniment)...")
+                # Demucs output goes into a subdirectory within the video's temp dir
+                separation_output_dir = video_temp_dir / "separated"
+                separator = SourceSeparator(
+                    wav_slice_paths,
+                    output_directory=separation_output_dir,
+                    config=separator_cfg # Pass config dict
+                )
+                vocal_paths, accompanies_paths = separator.separate_all()
 
-            # Critical check: Ensure separation actually produced files
-            if not vocal_paths:
-                logger.error(f"No vocal files found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
-                raise FileNotFoundError(f"No vocal files found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
-            if not accompanies_paths:
-                logger.error(f"No accompaniment files ('{SourceSeparator.ACCOMPANIMENT_FILENAME}') found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
-                raise FileNotFoundError(f"No accompaniment files ('{SourceSeparator.ACCOMPANIMENT_FILENAME}') found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
-            logger.info(f"Source separation complete. Found {len(vocal_paths)} vocals, {len(accompanies_paths)} accompaniments.")
+                # Critical check: Ensure separation actually produced files
+                if not vocal_paths:
+                    logger.error(f"No vocal files found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
+                    raise FileNotFoundError(f"No vocal files found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
+                if not accompanies_paths:
+                    logger.error(f"No accompaniment files ('{SourceSeparator.ACCOMPANIMENT_FILENAME}') found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
+                    raise FileNotFoundError(f"No accompaniment files ('{SourceSeparator.ACCOMPANIMENT_FILENAME}') found after separation in '{separation_output_dir}'. Check Demucs logs/output.")
+                logger.info(f"Source separation complete. Found {len(vocal_paths)} vocals, {len(accompanies_paths)} accompaniments.")
 
-            # --- Step 4: Analyze Vocals and Accompaniment ---
-            logger.info("\n[Step 4/5] Analyzing Separated Tracks...")
-            # Vocal Analysis (using AST model)
-            logger.info("Analyzing vocal tracks...")
-            result_vocal_raw, _ = audio_analyzer(
-                vocal_paths,
-                self.model,
-                self.device,
-                slice_duration=analyzer_cfg.get('ast_slice_duration_seconds', 5) # Use config
-            )
-            logger.info("Grouping vocal segments...")
-            vocal_singing_segments = class_manipulator(result_vocal_raw, self.singing_like_classes)
-            vocal_result_grouped = group_same_songs(
-                vocal_singing_segments,
-                interval_threshold=postproc_cfg.get('grouping_interval_threshold_seconds', 5), # Use config
-                duration_threshold=postproc_cfg.get('grouping_duration_threshold_seconds', 10) # Use config
-            )
-            logger.info(f"Found {len(vocal_result_grouped)} potential singing groups based on vocals.")
+                # --- Step 4: Analyze Vocals and Accompaniment ---
+                logger.info("\n[Step 4/5] Analyzing Separated Tracks...")
+                # Vocal Analysis (using AST model)
+                logger.info("Analyzing vocal tracks...")
+                result_vocal_raw, _ = audio_analyzer(
+                    vocal_paths,
+                    self.model,
+                    self.device,
+                    slice_duration=analyzer_cfg.get('ast_slice_duration_seconds', 5) # Use config
+                )
+                logger.info("Grouping vocal segments...")
+                vocal_singing_segments = class_manipulator(result_vocal_raw, self.singing_like_classes)
+                vocal_result_grouped = group_same_songs(
+                    vocal_singing_segments,
+                    interval_threshold=postproc_cfg.get('grouping_interval_threshold_seconds', 5), # Use config
+                    duration_threshold=postproc_cfg.get('grouping_duration_threshold_seconds', 10) # Use config
+                )
+                logger.info(f"Found {len(vocal_result_grouped)} potential singing groups based on vocals.")
 
-            # Accompaniment Analysis (using MFCC clustering)
-            logger.info("Analyzing accompaniment tracks...")
-            mfccs = mfcc_from_accompanies(
-                accompanies_paths,
-                slice_duration=analyzer_cfg.get('mfcc_slice_duration_seconds', 5), # Use config
-                n_mfcc=analyzer_cfg.get('mfcc_n_mfcc', 13) # Use config
-            )
-            logger.info("Clustering accompaniment segments...")
-            accomp_singing_segments, _ = cluster_mfccs_with_pca(
-                mfccs,
-                visualize=visualize_clusters,
-                time_window_length=analyzer_cfg.get('mfcc_slice_duration_seconds', 5), # Use config
-                n_components=analyzer_cfg.get('pca_n_components', 2), # Use config
-                n_clusters=analyzer_cfg.get('kmeans_n_clusters', 2) # Use config
-            )
-            accompanies_result_grouped = group_same_songs(
-                accomp_singing_segments,
-                interval_threshold=postproc_cfg.get('grouping_interval_threshold_seconds', 5), # Use config
-                duration_threshold=postproc_cfg.get('grouping_duration_threshold_seconds', 10) # Use config
-            )
-            logger.info(f"Found {len(accompanies_result_grouped)} potential singing groups based on accompaniment.")
+                # Accompaniment Analysis (using MFCC clustering)
+                logger.info("Analyzing accompaniment tracks...")
+                mfccs = mfcc_from_accompanies(
+                    accompanies_paths,
+                    slice_duration=analyzer_cfg.get('mfcc_slice_duration_seconds', 5), # Use config
+                    n_mfcc=analyzer_cfg.get('mfcc_n_mfcc', 13) # Use config
+                )
+                logger.info("Clustering accompaniment segments...")
+                accomp_singing_segments, _ = cluster_mfccs_with_pca(
+                    mfccs,
+                    visualize=visualize_clusters,
+                    time_window_length=analyzer_cfg.get('mfcc_slice_duration_seconds', 5), # Use config
+                    n_components=analyzer_cfg.get('pca_n_components', 2), # Use config
+                    n_clusters=analyzer_cfg.get('kmeans_n_clusters', 2) # Use config
+                )
+                accompanies_result_grouped = group_same_songs(
+                    accomp_singing_segments,
+                    interval_threshold=postproc_cfg.get('grouping_interval_threshold_seconds', 5), # Use config
+                    duration_threshold=postproc_cfg.get('grouping_duration_threshold_seconds', 10) # Use config
+                )
+                logger.info(f"Found {len(accompanies_result_grouped)} potential singing groups based on accompaniment.")
 
-            # --- Step 5: Combine Results and Identify A Cappella ---
-            logger.info("\n[Step 5/5] Combining Results and Identifying A Cappella...")
-            logger.info("Finding overlapping vocal/accompaniment segments...")
-            higher_probability_timestamps = find_and_filter_overlapping_timestamps(
-                accompanies_result_grouped,
-                vocal_df=vocal_result_grouped, # Pass vocal_df explicitly
-                threshold=postproc_cfg.get('overlap_merge_threshold_seconds', 30), # Use config
-                too_long_threshold=postproc_cfg.get('too_long_threshold_seconds', 420) # Use config
-            )
-            logger.info(f"Found {len(higher_probability_timestamps)} segments with high probability of singing + accompaniment.")
+                # --- Step 5: Combine Results and Identify A Cappella ---
+                logger.info("\n[Step 5/5] Combining Results and Identifying A Cappella...")
+                logger.info("Finding overlapping vocal/accompaniment segments...")
+                higher_probability_timestamps = find_and_filter_overlapping_timestamps(
+                    accompanies_result_grouped,
+                    vocal_df=vocal_result_grouped, # Pass vocal_df explicitly
+                    threshold=postproc_cfg.get('overlap_merge_threshold_seconds', 30), # Use config
+                    too_long_threshold=postproc_cfg.get('too_long_threshold_seconds', 420) # Use config
+                )
+                logger.info(f"Found {len(higher_probability_timestamps)} segments with high probability of singing + accompaniment.")
 
-            # A Cappella Identification: Find vocal segments that *don't* overlap with the high-probability ones
-            logger.info("Identifying potential a cappella segments...")
-            non_overlapping_rows = []
-            # Ensure vocal_result_grouped is not empty
-            if not vocal_result_grouped.empty:
-                for _, vocal_row in vocal_result_grouped.iterrows():
-                    vocal_interval = {'start': vocal_row['start'], 'end': vocal_row['end']}
-                    overlaps_found = False
-                    # Ensure higher_probability_timestamps is not empty
-                    if not higher_probability_timestamps.empty:
-                        for _, hp_row in higher_probability_timestamps.iterrows():
-                            hp_interval = {'start': hp_row['start'], 'end': hp_row['end']}
-                            # Use the utility overlap function
-                            if overlap(vocal_interval, hp_interval):
-                                overlaps_found = True
-                                break
-                    if not overlaps_found:
-                        non_overlapping_rows.append(vocal_row)
+                # A Cappella Identification: Find vocal segments that *don't* overlap with the high-probability ones
+                logger.info("Identifying potential a cappella segments...")
+                non_overlapping_rows = []
+                # Ensure vocal_result_grouped is not empty
+                if not vocal_result_grouped.empty:
+                    for _, vocal_row in vocal_result_grouped.iterrows():
+                        vocal_interval = {'start': vocal_row['start'], 'end': vocal_row['end']}
+                        overlaps_found = False
+                        # Ensure higher_probability_timestamps is not empty
+                        if not higher_probability_timestamps.empty:
+                            for _, hp_row in higher_probability_timestamps.iterrows():
+                                hp_interval = {'start': hp_row['start'], 'end': hp_row['end']}
+                                # Use the utility overlap function
+                                if overlap(vocal_interval, hp_interval):
+                                    overlaps_found = True
+                                    break
+                        if not overlaps_found:
+                            non_overlapping_rows.append(vocal_row)
 
-            possible_a_capella = pd.DataFrame(non_overlapping_rows).reset_index(drop=True)
-            # Ensure columns are present even if empty
-            if possible_a_capella.empty and not vocal_result_grouped.empty:
-                 possible_a_capella = pd.DataFrame(columns=vocal_result_grouped.columns)
+                possible_a_capella = pd.DataFrame(non_overlapping_rows).reset_index(drop=True)
+                # Ensure columns are present even if empty
+                if possible_a_capella.empty and not vocal_result_grouped.empty:
+                     possible_a_capella = pd.DataFrame(columns=vocal_result_grouped.columns)
 
-            logger.info(f"Found {len(possible_a_capella)} potential a cappella segments.")
+                logger.info(f"Found {len(possible_a_capella)} potential a cappella segments.")
 
             logger.info("\n--- Processing Complete ---")
             # Return the final DataFrames
@@ -279,4 +320,4 @@ class VideoSingingDetector:
             # --- Cleanup ---
             # Ensure the temporary directory for this specific video is removed
             if video_temp_dir:
-                 self._cleanup_temp_dir(video_temp_dir) 
+                 self._cleanup_temp_dir(video_temp_dir)
